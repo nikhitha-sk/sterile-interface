@@ -124,8 +124,13 @@ def is_open_palm(fingers):
     """4-5 fingers extended = open palm"""
     return count_extended_fingers(fingers) >= 4
 
-def is_pinch(hand):
-    """Thumb and index fingertips close together = pinch gesture"""
+def is_pinch(hand, fingers):
+    """Thumb and index fingertips close together = pinch gesture
+       But NOT if index finger is extended/pointing up"""
+    # Don't trigger pinch if index finger is pointing up alone
+    if is_index_pointing(fingers):
+        return False
+    
     thumb_tip = hand[4]
     index_tip = hand[8]
     
@@ -141,36 +146,28 @@ def is_two_fingers(fingers):
             not fingers['ring'] and 
             not fingers['pinky'])
 
-def is_fist_or_one_finger(fingers):
-    """Fist or only one finger up - good for swiping"""
-    extended = count_extended_fingers(fingers)
-    return extended <= 2  # Fist or 1-2 fingers
+def is_index_pointing(fingers):
+    """Only index finger extended = pointing for next image"""
+    return (fingers['index'] and 
+            not fingers['middle'] and 
+            not fingers['ring'] and 
+            not fingers['pinky'])
 
 # State variables  
-prev_palm_x = None
-prev_palm_time = None
-SWIPE_THRESHOLD = 120  # pixels for swipe
-SWIPE_MIN_TIME = 0.1   # minimum time for swipe
-SWIPE_MAX_TIME = 0.6   # maximum time for swipe
-
-COOLDOWN_TIME = 0.5  # seconds between gestures
-last_swipe_time = 0
+COOLDOWN_TIME = 0.7  # seconds between gestures
+last_next_time = 0
 last_zoom_time = 0
 last_reset_time = 0
-
-# Position history for velocity calculation
-x_history = []
-HISTORY_SIZE = 5
 
 current_gesture = "NONE"
 
 print("=" * 50)
-print("GESTURE CONTROL - NEW GESTURES")
+print("GESTURE CONTROL")
 print("=" * 50)
-print("👋 OPEN PALM (4-5 fingers)     -> Reset zoom")
+print("☝️  INDEX FINGER UP             -> Next image")
 print("🤏 PINCH (thumb+index close)   -> Zoom IN")
 print("✌️  TWO FINGERS (peace sign)    -> Zoom OUT")  
-print("👊 FIST/1-2 FINGERS + SWIPE    -> Next/Prev image")
+print("👋 OPEN PALM (4-5 fingers)     -> Reset zoom")
 print("Press 'q' or ESC to quit")
 print("=" * 50)
 
@@ -199,9 +196,9 @@ while True:
         fingers = get_finger_state(hand, frame.shape)
         num_fingers = count_extended_fingers(fingers)
         
-        # Get palm center for swipe tracking
-        palm_x = int(hand[0].x * w)
-        palm_y = int(hand[0].y * h)
+        # Get index fingertip position
+        index_x = int(hand[8].x * w)
+        index_y = int(hand[8].y * h)
         
         # Draw all fingertips
         tip_indices = [4, 8, 12, 16, 20]
@@ -211,19 +208,26 @@ while True:
             py = int(hand[idx].y * h)
             cv2.circle(frame, (px, py), 8, tip_colors[i], -1)
         
-        # Draw palm center
-        cv2.circle(frame, (palm_x, palm_y), 12, (255, 255, 255), 3)
-        
-        # Add to position history
-        x_history.append((palm_x, current_time))
-        if len(x_history) > HISTORY_SIZE:
-            x_history.pop(0)
+        # Draw index finger larger when pointing
+        if is_index_pointing(fingers):
+            cv2.circle(frame, (index_x, index_y), 20, (0, 255, 0), 3)
         
         # ========== GESTURE DETECTION ==========
         
-        # Check for PINCH (zoom in) - thumb and index close
-        if is_pinch(hand):
-            gesture_text = f"PINCH - Zoom IN ({num_fingers} fingers)"
+        # PRIORITY 1: INDEX FINGER UP = NEXT IMAGE (no zoom when pointing)
+        if is_index_pointing(fingers):
+            gesture_text = "INDEX UP -> NEXT IMAGE"
+            color = (0, 255, 255)  # Yellow
+            current_gesture = "POINTING"
+            
+            if (current_time - last_next_time) > COOLDOWN_TIME:
+                send_command('NEXT')
+                print("➡️ NEXT IMAGE")
+                last_next_time = current_time
+        
+        # PRIORITY 2: Check for PINCH (zoom in) - only if NOT index pointing
+        elif is_pinch(hand, fingers):
+            gesture_text = "PINCH - Zoom IN"
             color = (0, 165, 255)  # Orange
             current_gesture = "PINCH"
             
@@ -231,9 +235,8 @@ while True:
                 send_command('ZOOM_IN')
                 print("🔍 ZOOM IN")
                 last_zoom_time = current_time
-                x_history.clear()  # Clear to prevent accidental swipe
         
-        # Check for TWO FINGERS (zoom out)
+        # PRIORITY 3: Check for TWO FINGERS (zoom out)
         elif is_two_fingers(fingers):
             gesture_text = "TWO FINGERS - Zoom OUT"
             color = (255, 0, 255)  # Magenta
@@ -243,11 +246,10 @@ while True:
                 send_command('ZOOM_OUT')
                 print("🔎 ZOOM OUT")
                 last_zoom_time = current_time
-                x_history.clear()
         
-        # Check for OPEN PALM (reset zoom)
+        # PRIORITY 4: Check for OPEN PALM (reset zoom)
         elif is_open_palm(fingers):
-            gesture_text = f"OPEN PALM - Reset ({num_fingers} fingers)"
+            gesture_text = "OPEN PALM - Reset zoom"
             color = (0, 255, 0)  # Green
             current_gesture = "PALM"
             
@@ -255,41 +257,13 @@ while True:
                 send_command('RESET')
                 print("🔄 RESET ZOOM")
                 last_reset_time = current_time
-                x_history.clear()
         
-        # Check for FIST or 1-2 fingers (swipe for navigation)
-        elif is_fist_or_one_finger(fingers):
-            gesture_text = f"SWIPE MODE ({num_fingers} fingers)"
-            color = (255, 255, 0)  # Cyan
-            current_gesture = "SWIPE"
-            
-            # Calculate swipe using history
-            if len(x_history) >= 3 and (current_time - last_swipe_time) > COOLDOWN_TIME:
-                first_x, first_time = x_history[0]
-                last_x, last_time = x_history[-1]
-                
-                time_diff = last_time - first_time
-                x_diff = last_x - first_x
-                
-                if SWIPE_MIN_TIME < time_diff < SWIPE_MAX_TIME:
-                    if x_diff > SWIPE_THRESHOLD:
-                        send_command('NEXT')
-                        print(f"➡️ NEXT IMAGE (moved {x_diff}px)")
-                        last_swipe_time = current_time
-                        x_history.clear()
-                    
-                    elif x_diff < -SWIPE_THRESHOLD:
-                        send_command('PREV')
-                        print(f"⬅️ PREVIOUS IMAGE (moved {x_diff}px)")
-                        last_swipe_time = current_time
-                        x_history.clear()
         else:
             gesture_text = f"Hand ({num_fingers} fingers)"
             color = (200, 200, 200)
             current_gesture = "OTHER"
     else:
         # No hand - reset states
-        x_history.clear()
         current_gesture = "NONE"
 
     # Draw gesture info on frame
