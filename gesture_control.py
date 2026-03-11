@@ -155,6 +155,7 @@ def is_index_pointing(fingers):
 
 # State variables  
 COOLDOWN_TIME = 0.7  # seconds between gestures
+NEXT_IMAGE_COOLDOWN = 1.5  # longer delay between next image triggers
 last_next_time = 0
 last_zoom_time = 0
 last_reset_time = 0
@@ -164,7 +165,7 @@ current_gesture = "NONE"
 print("=" * 50)
 print("GESTURE CONTROL")
 print("=" * 50)
-print("☝️  INDEX FINGER UP             -> Next image")
+print("☝️  INDEX FINGER UP             -> Next image (1.5s delay)")
 print("🤏 PINCH (thumb+index close)   -> Zoom IN")
 print("✌️  TWO FINGERS (peace sign)    -> Zoom OUT")  
 print("👋 OPEN PALM (4-5 fingers)     -> Reset zoom")
@@ -220,7 +221,7 @@ while True:
             color = (0, 255, 255)  # Yellow
             current_gesture = "POINTING"
             
-            if (current_time - last_next_time) > COOLDOWN_TIME:
+            if (current_time - last_next_time) > NEXT_IMAGE_COOLDOWN:
                 send_command('NEXT')
                 print("➡️ NEXT IMAGE")
                 last_next_time = current_time
