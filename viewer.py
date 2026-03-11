@@ -11,7 +11,7 @@ if not images:
     exit(1)
 
 print(f"Loaded {len(images)} images")
-print("Controls: Left/Right arrows to navigate, +/- to zoom, q/ESC to quit")
+print("Controls: Left/Right arrows to navigate, +/- to zoom, 0 to reset zoom, q/ESC to quit")
 
 index = 0
 zoom = 1.0
@@ -28,10 +28,20 @@ while True:
     h, w = img.shape[:2]
     new_w, new_h = int(w*zoom), int(h*zoom)
     if new_w > 0 and new_h > 0:
-        resized = cv2.resize(img, (new_w, new_h))
+        # Use high-quality interpolation for better zoom
+        if zoom > 1.0:
+            # INTER_CUBIC for zooming in - better quality
+            resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
+        else:
+            # INTER_AREA for zooming out - better for shrinking
+            resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
     else:
         resized = img
 
+    # Show zoom level
+    cv2.putText(resized, f"Zoom: {zoom:.1f}x  Image: {index+1}/{len(images)}", 
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+    
     cv2.imshow("Medical Viewer", resized)
 
     key = cv2.waitKey(50) & 0xFF  # Mask to get proper key code
@@ -45,11 +55,15 @@ while True:
     elif key == 83:   # right arrow
         index = (index + 1) % len(images)
 
-    elif key == ord('+'):
-        zoom += 0.1
+    elif key == ord('+') or key == ord('='):  # + or = (for keyboards without numpad)
+        zoom = min(5.0, zoom + 0.2)  # Max zoom 5x
 
-    elif key == ord('-'):
-        zoom = max(0.1, zoom - 0.1)  # Prevent zoom going to 0
+    elif key == ord('-') or key == ord('_'):
+        zoom = max(0.2, zoom - 0.2)  # Min zoom 0.2x
+    
+    elif key == ord('0'):  # Reset zoom
+        zoom = 1.0
+        print("Zoom reset to 1.0x")
 
 cv2.destroyAllWindows()
 cv2.waitKey(1)  # Ensure window closes
