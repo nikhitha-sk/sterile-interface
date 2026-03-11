@@ -3,11 +3,22 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import numpy as np
-import pyautogui
 import urllib.request
 import os
 import time
 import math
+
+COMMAND_FILE = "/tmp/gesture_command.txt"
+
+def send_command(cmd):
+    """Send a command to the viewer via shared file"""
+    try:
+        with open(COMMAND_FILE, 'w') as f:
+            f.write(cmd)
+        return True
+    except Exception as e:
+        print(f"Could not send command: {e}")
+    return False
 
 # Download hand landmarker model if not exists
 MODEL_PATH = "hand_landmarker.task"
@@ -95,7 +106,7 @@ def get_finger_state(hand, frame_shape):
     thumb_ip = hand[3]
     index_mcp = hand[5]
     # Thumb is extended if tip is far from index MCP
-    thumb_extended = abs(thumb_tip.x - index_mcp.x) > 0.1
+    thumb_extended = abs(thumb_tip.x - index_mcp.x) > 0.08
     
     return {
         'thumb': thumb_extended,
@@ -105,63 +116,61 @@ def get_finger_state(hand, frame_shape):
         'pinky': pinky_extended
     }
 
+def count_extended_fingers(fingers):
+    """Count how many fingers are extended"""
+    return sum(1 for f in fingers.values() if f)
+
 def is_open_palm(fingers):
-    """All 5 fingers extended = open palm"""
-    return all(fingers.values())
+    """4-5 fingers extended = open palm"""
+    return count_extended_fingers(fingers) >= 4
 
 def is_pinch(hand):
-    """All fingertips close together = pinch gesture"""
-    # Get all fingertip positions
+    """Thumb and index fingertips close together = pinch gesture"""
     thumb_tip = hand[4]
     index_tip = hand[8]
-    middle_tip = hand[12]
-    ring_tip = hand[16]
-    pinky_tip = hand[20]
     
-    tips = [thumb_tip, index_tip, middle_tip, ring_tip, pinky_tip]
+    # Distance between thumb and index tips
+    dist = math.sqrt((thumb_tip.x - index_tip.x)**2 + (thumb_tip.y - index_tip.y)**2)
     
-    # Calculate center of all tips
-    center_x = sum(t.x for t in tips) / 5
-    center_y = sum(t.y for t in tips) / 5
-    
-    # Check if all tips are close to center
-    PINCH_THRESHOLD = 0.08  # Maximum distance from center for pinch
-    
-    for tip in tips:
-        dist = math.sqrt((tip.x - center_x)**2 + (tip.y - center_y)**2)
-        if dist > PINCH_THRESHOLD:
-            return False
-    
-    return True
+    return dist < 0.06  # Close together
 
-def is_index_pointing(fingers):
-    """Only index finger extended = pointing gesture"""
+def is_two_fingers(fingers):
+    """Index and middle extended, others closed = peace sign / 2 fingers"""
     return (fingers['index'] and 
-            not fingers['middle'] and 
+            fingers['middle'] and 
             not fingers['ring'] and 
             not fingers['pinky'])
 
-# State variables
-swipe_start_x = None
-swipe_start_time = None
-SWIPE_THRESHOLD = 80  # pixels for swipe
-SWIPE_TIME_WINDOW = 0.5  # seconds
+def is_fist_or_one_finger(fingers):
+    """Fist or only one finger up - good for swiping"""
+    extended = count_extended_fingers(fingers)
+    return extended <= 2  # Fist or 1-2 fingers
 
-COOLDOWN_TIME = 0.6  # seconds between gestures
+# State variables  
+prev_palm_x = None
+prev_palm_time = None
+SWIPE_THRESHOLD = 120  # pixels for swipe
+SWIPE_MIN_TIME = 0.1   # minimum time for swipe
+SWIPE_MAX_TIME = 0.6   # maximum time for swipe
+
+COOLDOWN_TIME = 0.5  # seconds between gestures
 last_swipe_time = 0
 last_zoom_time = 0
 last_reset_time = 0
 
-# Track pinch state to detect release
-was_pinching = False
+# Position history for velocity calculation
+x_history = []
+HISTORY_SIZE = 5
+
 current_gesture = "NONE"
 
 print("=" * 50)
 print("GESTURE CONTROL - NEW GESTURES")
 print("=" * 50)
-print("👋 OPEN PALM (all fingers spread) -> Reset zoom")
-print("🤏 PINCH (all fingers together)  -> Zoom IN")
-print("☝️  INDEX POINTING + SWIPE        -> Next/Prev image")
+print("👋 OPEN PALM (4-5 fingers)     -> Reset zoom")
+print("🤏 PINCH (thumb+index close)   -> Zoom IN")
+print("✌️  TWO FINGERS (peace sign)    -> Zoom OUT")  
+print("👊 FIST/1-2 FINGERS + SWIPE    -> Next/Prev image")
 print("Press 'q' or ESC to quit")
 print("=" * 50)
 
@@ -188,6 +197,11 @@ while True:
         
         # Get finger states
         fingers = get_finger_state(hand, frame.shape)
+        num_fingers = count_extended_fingers(fingers)
+        
+        # Get palm center for swipe tracking
+        palm_x = int(hand[0].x * w)
+        palm_y = int(hand[0].y * h)
         
         # Draw all fingertips
         tip_indices = [4, 8, 12, 16, 20]
@@ -198,86 +212,88 @@ while True:
             cv2.circle(frame, (px, py), 8, tip_colors[i], -1)
         
         # Draw palm center
-        palm_x = int(hand[0].x * w)
-        palm_y = int(hand[0].y * h)
-        cv2.circle(frame, (palm_x, palm_y), 10, (255, 255, 255), 2)
+        cv2.circle(frame, (palm_x, palm_y), 12, (255, 255, 255), 3)
+        
+        # Add to position history
+        x_history.append((palm_x, current_time))
+        if len(x_history) > HISTORY_SIZE:
+            x_history.pop(0)
         
         # ========== GESTURE DETECTION ==========
         
-        # Check for PINCH (zoom in)
+        # Check for PINCH (zoom in) - thumb and index close
         if is_pinch(hand):
-            gesture_text = "PINCH - Zooming IN"
+            gesture_text = f"PINCH - Zoom IN ({num_fingers} fingers)"
             color = (0, 165, 255)  # Orange
             current_gesture = "PINCH"
-            was_pinching = True
             
             if (current_time - last_zoom_time) > COOLDOWN_TIME:
-                pyautogui.press('+')
+                send_command('ZOOM_IN')
                 print("🔍 ZOOM IN")
                 last_zoom_time = current_time
+                x_history.clear()  # Clear to prevent accidental swipe
+        
+        # Check for TWO FINGERS (zoom out)
+        elif is_two_fingers(fingers):
+            gesture_text = "TWO FINGERS - Zoom OUT"
+            color = (255, 0, 255)  # Magenta
+            current_gesture = "TWO"
+            
+            if (current_time - last_zoom_time) > COOLDOWN_TIME:
+                send_command('ZOOM_OUT')
+                print("🔎 ZOOM OUT")
+                last_zoom_time = current_time
+                x_history.clear()
         
         # Check for OPEN PALM (reset zoom)
         elif is_open_palm(fingers):
-            gesture_text = "OPEN PALM - Normal view"
+            gesture_text = f"OPEN PALM - Reset ({num_fingers} fingers)"
             color = (0, 255, 0)  # Green
             current_gesture = "PALM"
             
-            # If we were pinching and now showing palm, reset zoom
-            if was_pinching and (current_time - last_reset_time) > COOLDOWN_TIME:
-                pyautogui.press('0')  # Send 0 to reset zoom
+            if (current_time - last_reset_time) > COOLDOWN_TIME:
+                send_command('RESET')
                 print("🔄 RESET ZOOM")
                 last_reset_time = current_time
-                was_pinching = False
+                x_history.clear()
         
-        # Check for INDEX POINTING (swipe for navigation)
-        elif is_index_pointing(fingers):
-            gesture_text = "POINTING - Swipe to navigate"
+        # Check for FIST or 1-2 fingers (swipe for navigation)
+        elif is_fist_or_one_finger(fingers):
+            gesture_text = f"SWIPE MODE ({num_fingers} fingers)"
             color = (255, 255, 0)  # Cyan
-            current_gesture = "POINTING"
+            current_gesture = "SWIPE"
             
-            # Get index tip position for swipe
-            index_x = int(hand[8].x * w)
-            
-            if swipe_start_x is None:
-                swipe_start_x = index_x
-                swipe_start_time = current_time
-            else:
-                elapsed = current_time - swipe_start_time
+            # Calculate swipe using history
+            if len(x_history) >= 3 and (current_time - last_swipe_time) > COOLDOWN_TIME:
+                first_x, first_time = x_history[0]
+                last_x, last_time = x_history[-1]
                 
-                if elapsed > SWIPE_TIME_WINDOW:
-                    # Reset swipe tracking
-                    swipe_start_x = index_x
-                    swipe_start_time = current_time
-                elif (current_time - last_swipe_time) > COOLDOWN_TIME:
-                    diff = index_x - swipe_start_x
-                    
-                    if diff > SWIPE_THRESHOLD:
-                        pyautogui.press("right")
-                        print("➡️ NEXT IMAGE")
+                time_diff = last_time - first_time
+                x_diff = last_x - first_x
+                
+                if SWIPE_MIN_TIME < time_diff < SWIPE_MAX_TIME:
+                    if x_diff > SWIPE_THRESHOLD:
+                        send_command('NEXT')
+                        print(f"➡️ NEXT IMAGE (moved {x_diff}px)")
                         last_swipe_time = current_time
-                        swipe_start_x = None
-                        swipe_start_time = None
+                        x_history.clear()
                     
-                    elif diff < -SWIPE_THRESHOLD:
-                        pyautogui.press("left")
-                        print("⬅️ PREVIOUS IMAGE")
+                    elif x_diff < -SWIPE_THRESHOLD:
+                        send_command('PREV')
+                        print(f"⬅️ PREVIOUS IMAGE (moved {x_diff}px)")
                         last_swipe_time = current_time
-                        swipe_start_x = None
-                        swipe_start_time = None
+                        x_history.clear()
         else:
-            gesture_text = "Hand detected"
+            gesture_text = f"Hand ({num_fingers} fingers)"
             color = (200, 200, 200)
             current_gesture = "OTHER"
-            swipe_start_x = None
-            swipe_start_time = None
     else:
         # No hand - reset states
-        swipe_start_x = None
-        swipe_start_time = None
+        x_history.clear()
         current_gesture = "NONE"
 
     # Draw gesture info on frame
-    cv2.rectangle(frame, (5, 5), (350, 45), (0, 0, 0), -1)
+    cv2.rectangle(frame, (5, 5), (400, 80), (0, 0, 0), -1)
     cv2.putText(frame, gesture_text, (10, 35), 
                cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
     
@@ -285,8 +301,8 @@ while True:
     if results.hand_landmarks and len(results.hand_landmarks) > 0:
         fingers = get_finger_state(results.hand_landmarks[0], frame.shape)
         finger_str = f"T:{int(fingers['thumb'])} I:{int(fingers['index'])} M:{int(fingers['middle'])} R:{int(fingers['ring'])} P:{int(fingers['pinky'])}"
-        cv2.putText(frame, finger_str, (10, 70), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(frame, finger_str, (10, 65), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
     cv2.imshow("Gesture Camera", frame)
 
